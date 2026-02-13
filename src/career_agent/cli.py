@@ -228,6 +228,10 @@ def learn(package: str = typer.Argument(None)):
         action_text = change.action.value.replace("_", " ").upper()
         panel_content.append(f"\n[bold]Recommended:[/bold] {action_text}")
 
+        # Changelog link
+        if change.changelog_url:
+            panel_content.append(f"\n[link={change.changelog_url}]{change.changelog_url}[/link]")
+
         console.print(Panel(
             "\n".join(panel_content),
             title=f"{change.display_name} {change.new_version}",

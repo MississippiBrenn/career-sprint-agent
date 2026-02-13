@@ -1,17 +1,19 @@
 """Command-line interface for Career Sprint Agent."""
 
 import asyncio
+import webbrowser
 from datetime import datetime, timedelta
 
 import typer
 from rich.console import Console
 from rich.panel import Panel
+from rich.prompt import Confirm, IntPrompt, Prompt
 from rich.table import Table
 from rich.text import Text
 
 from .config import LIBRARY_STATE_FILE, LIBRARIES
 from .core import LibraryMonitor, Storage
-from .core.models import ActionType, ChangeType
+from .core.models import ActionType, ChangeType, StudySession
 
 app = typer.Typer(
     name="career-agent",
@@ -238,6 +240,178 @@ def learn(package: str = typer.Argument(None)):
             border_style=action_style(change.action),
         ))
         console.print()
+
+
+@app.command()
+def dive(package: str):
+    """Start a deep dive study session for a library."""
+    monitor = get_monitor()
+    state = monitor.get_status()
+
+    # Check for active session
+    active = state.get_active_session()
+    if active:
+        console.print(
+            f"[yellow]Active session in progress: {active.display_name} "
+            f"(started {active.started_at.strftime('%H:%M')})[/yellow]"
+        )
+        console.print("Run [bold]career-agent done[/bold] to complete it first.")
+        return
+
+    # Find the library change
+    changes = [c for c in state.recent_changes if c.library == package]
+    if not changes:
+        # Check if it's a tracked library
+        if package not in state.libraries:
+            console.print(f"[red]Library '{package}' not found.[/red]")
+            console.print("Run [bold]career-agent check-updates[/bold] first.")
+            return
+        # Use library info instead
+        lib = state.libraries[package]
+        display_name = lib.display_name
+        version = lib.latest_version
+        changelog_url = None
+        concepts = None
+    else:
+        change = changes[-1]  # Most recent
+        display_name = change.display_name
+        version = change.new_version
+        changelog_url = change.changelog_url
+        concepts = change.concepts
+
+    # Create study session
+    session = StudySession(
+        library=package,
+        display_name=display_name,
+        version=version,
+        started_at=datetime.now(),
+    )
+    state.study_sessions.append(session)
+    monitor.storage.save(state)
+
+    # Display session start
+    console.print(Panel(
+        f"[bold green]Deep dive started![/bold green]\n\n"
+        f"Library: [cyan]{display_name}[/cyan]\n"
+        f"Version: [yellow]{version}[/yellow]\n"
+        f"Started: {session.started_at.strftime('%Y-%m-%d %H:%M')}",
+        title="Study Session",
+        border_style="green",
+    ))
+
+    # Show concepts if available
+    if concepts:
+        console.print("\n[bold]Concepts to explore:[/bold]")
+        if concepts.beginner:
+            console.print(f"  [green]Beginner:[/green] {', '.join(concepts.beginner)}")
+        if concepts.intermediate:
+            console.print(f"  [yellow]Intermediate:[/yellow] {', '.join(concepts.intermediate)}")
+        if concepts.advanced:
+            console.print(f"  [red]Advanced:[/red] {', '.join(concepts.advanced)}")
+
+    # Open changelog if available
+    if changelog_url:
+        console.print(f"\n[dim]Opening changelog...[/dim]")
+        webbrowser.open(changelog_url)
+    else:
+        console.print(f"\n[dim]No changelog URL available. Check PyPI or GitHub.[/dim]")
+
+    console.print("\n[bold]When finished, run:[/bold] career-agent done")
+
+
+@app.command()
+def done():
+    """Complete the current study session."""
+    monitor = get_monitor()
+    state = monitor.get_status()
+
+    # Find active session
+    active = state.get_active_session()
+    if not active:
+        console.print("[yellow]No active study session.[/yellow]")
+        console.print("Start one with: [bold]career-agent dive <library>[/bold]")
+        return
+
+    # Calculate duration
+    ended_at = datetime.now()
+    duration = int((ended_at - active.started_at).total_seconds() / 60)
+
+    console.print(Panel(
+        f"Completing session: [cyan]{active.display_name}[/cyan]\n"
+        f"Duration: [yellow]{duration} minutes[/yellow]",
+        title="Session Complete",
+        border_style="cyan",
+    ))
+
+    # Prompt for details
+    cards = IntPrompt.ask("AnkiDroid cards created", default=0)
+    notes = Prompt.ask("Quick notes (optional)", default="")
+
+    # Update session
+    active.ended_at = ended_at
+    active.duration_minutes = duration
+    active.cards_created = cards
+    active.notes = notes if notes else None
+    active.completed = True
+
+    monitor.storage.save(state)
+
+    console.print(f"\n[green]Session logged![/green]")
+    console.print(f"  Duration: {duration} min | Cards: {cards}")
+    if notes:
+        console.print(f"  Notes: {notes}")
+
+    # Suggest marking as updated
+    if Confirm.ask(f"\nMark [cyan]{active.library}[/cyan] as studied?", default=True):
+        monitor.mark_updated(active.library)
+        console.print(f"[green]Marked {active.library} as current.[/green]")
+
+
+@app.command()
+def sessions(days: int = 30):
+    """Show recent study sessions."""
+    monitor = get_monitor()
+    state = monitor.get_status()
+
+    if not state.study_sessions:
+        console.print("[dim]No study sessions yet.[/dim]")
+        console.print("Start one with: [bold]career-agent dive <library>[/bold]")
+        return
+
+    since = datetime.now() - timedelta(days=days)
+    recent = [s for s in state.study_sessions if s.started_at > since]
+
+    if not recent:
+        console.print(f"[dim]No sessions in the last {days} days.[/dim]")
+        return
+
+    table = Table(title=f"Study Sessions (last {days} days)", show_header=True)
+    table.add_column("Date", style="dim")
+    table.add_column("Library", style="cyan")
+    table.add_column("Duration", style="yellow")
+    table.add_column("Cards", style="green")
+    table.add_column("Status")
+
+    total_minutes = 0
+    total_cards = 0
+
+    for session in recent:
+        status = "[green]✓[/green]" if session.completed else "[yellow]in progress[/yellow]"
+        duration = f"{session.duration_minutes} min" if session.duration_minutes is not None else "-"
+        if session.duration_minutes is not None:
+            total_minutes += session.duration_minutes
+        total_cards += session.cards_created
+
+        table.add_row(
+            session.started_at.strftime("%Y-%m-%d"),
+            session.display_name,
+            duration,
+            str(session.cards_created),
+            status,
+        )
+
+    console.print(table)
+    console.print(f"\n[bold]Total:[/bold] {total_minutes} min | {total_cards} cards")
 
 
 @app.command()

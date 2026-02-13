@@ -64,10 +64,24 @@ class LibraryChange(BaseModel):
     learning_prompt: Optional[str] = None
 
 
+class StudySession(BaseModel):
+    """A deep dive study session."""
+    library: str
+    display_name: str
+    version: str
+    started_at: datetime
+    ended_at: Optional[datetime] = None
+    duration_minutes: Optional[int] = None
+    notes: Optional[str] = None
+    cards_created: int = 0
+    completed: bool = False
+
+
 class LibraryState(BaseModel):
     """Complete state of all monitored libraries."""
     libraries: dict[str, LibraryInfo] = Field(default_factory=dict)
     recent_changes: list[LibraryChange] = Field(default_factory=list)
+    study_sessions: list[StudySession] = Field(default_factory=list)
     last_full_check: Optional[datetime] = None
 
     def get_outdated(self) -> list[LibraryInfo]:
@@ -77,3 +91,10 @@ class LibraryState(BaseModel):
     def get_changes_since(self, since: datetime) -> list[LibraryChange]:
         """Get changes detected after a specific time."""
         return [c for c in self.recent_changes if c.detected_at > since]
+
+    def get_active_session(self) -> Optional[StudySession]:
+        """Get currently active study session if any."""
+        for session in reversed(self.study_sessions):
+            if not session.completed:
+                return session
+        return None
